@@ -16,6 +16,7 @@
 #include "our_descriptor.h"
 #include "platform.h"
 #include "remapper.h"
+#include "switch_pro.h"
 
 #define MAX_REPORT_SIZE 64
 
@@ -394,6 +395,15 @@ void set_mapping_from_config() {
     reverse_mapping_layers.clear();
     used_state_slots = 0;
     usage_state_ptr.clear();
+    if (our_descriptor_number == SWITCH_PRO_DESCRIPTOR_INDEX) {
+        // HID inputs are decoded only when a state slot exists. Motion is sent
+        // directly in Pro reports, so it needs raw slots even without mappings.
+        for (uint32_t usage = 0x00200453; usage <= 0x00200459; usage++) {
+            if (usage != 0x00200456) {
+                assign_state_slot(usage, 0, true);
+            }
+        }
+    }
     register_ptrs.clear();
     memset(input_state, 0, sizeof(input_state));
     memset(tap_hold_state, 0, sizeof(tap_hold_state));
@@ -1441,7 +1451,10 @@ bool send_report(send_report_t do_send_report) {
     uint8_t report_id = outgoing_reports[or_head][0];
 
     bool sent = false;
-    if (our_descriptor == &our_descriptors[our_descriptor_number]) {
+    if (our_descriptor_number == SWITCH_PRO_DESCRIPTOR_INDEX) {
+        switch_pro_update_horipad(outgoing_reports[or_head] + 1, report_sizes[report_id]);
+        sent = true;
+    } else if (our_descriptor == &our_descriptors[our_descriptor_number]) {
         sent = do_send_report(0, outgoing_reports[or_head], report_sizes[report_id] + 1);
     }
 
@@ -1497,6 +1510,10 @@ inline void read_input(const uint8_t* report, int len, uint32_t source_usage, co
                 value |= 0xFFFFFFFF << their_usage.size;
             }
         }
+    }
+
+    if (our_descriptor_number == SWITCH_PRO_DESCRIPTOR_INDEX && !their_usage.should_be_scaled) {
+        switch_pro_imu_input(source_usage, value);
     }
 
     if (their_usage.is_relative) {

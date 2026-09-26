@@ -31,6 +31,7 @@
 #include "our_descriptor.h"
 #include "platform.h"
 #include "remapper.h"
+#include "switch_pro.h"
 
 // These IDs are bogus. If you want to distribute any hardware using this,
 // you will have to get real ones.
@@ -93,6 +94,12 @@ const uint8_t configuration_descriptor5[] = {
     TUD_HID_DESCRIPTOR(1, 0, HID_ITF_PROTOCOL_NONE, config_report_descriptor_length, 0x83, CFG_TUD_HID_EP_BUFSIZE, 1),
 };
 
+const uint8_t configuration_descriptor6[] = {
+    TUD_CONFIG_DESCRIPTOR(1, 2, 0, TUD_CONFIG_DESC_LEN + TUD_HID_INOUT_DESC_LEN + TUD_HID_DESC_LEN, 0, 100),
+    TUD_HID_INOUT_DESCRIPTOR(0, 0, HID_ITF_PROTOCOL_NONE, switch_pro_report_descriptor_length, 0x02, 0x81, CFG_TUD_HID_EP_BUFSIZE, 1),
+    TUD_HID_DESCRIPTOR(1, 0, HID_ITF_PROTOCOL_NONE, config_report_descriptor_length, 0x83, CFG_TUD_HID_EP_BUFSIZE, 1),
+};
+
 const uint8_t* configuration_descriptors[] = {
     configuration_descriptor0,
     configuration_descriptor1,
@@ -100,6 +107,7 @@ const uint8_t* configuration_descriptors[] = {
     configuration_descriptor3,
     configuration_descriptor4,
     configuration_descriptor5,
+    configuration_descriptor6,
 };
 
 char const* string_desc_arr[] = {
@@ -135,7 +143,7 @@ uint8_t const* tud_descriptor_configuration_cb(uint8_t index) {
 // Descriptor contents must exist long enough for transfer to complete
 uint8_t const* tud_hid_descriptor_report_cb(uint8_t itf) {
     if (itf == 0) {
-        return our_descriptor->descriptor;
+        return our_descriptor->usb_descriptor != nullptr ? our_descriptor->usb_descriptor : our_descriptor->descriptor;
     } else if (itf == 1) {
         return config_report_descriptor;
     }
@@ -163,6 +171,10 @@ uint16_t const* tud_descriptor_string_cb(uint8_t index, uint16_t langid) {
             return NULL;
 
         const char* str = string_desc_arr[index];
+        if (our_descriptor_number == SWITCH_PRO_DESCRIPTOR_INDEX) {
+            if (index == 1) str = "Nintendo Co., Ltd.";
+            if (index == 2) str = "Pro Controller";
+        }
 
         // Cap at max char
         chr_count = strlen(str);
@@ -174,7 +186,7 @@ uint16_t const* tud_descriptor_string_cb(uint8_t index, uint16_t langid) {
             _desc_str[1 + i] = str[i];
         }
 
-        if (index == 2) {
+        if (index == 2 && our_descriptor_number != SWITCH_PRO_DESCRIPTOR_INDEX) {
             uint64_t unique_id = get_unique_id();
             for (uint8_t i = 0; i < 4; i++) {
                 _desc_str[1 + chr_count - 4 + i] = id_chars[(unique_id >> (15 - i * 5)) & 0x1F];
@@ -208,6 +220,7 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t rep
         if ((report_id == 0) && (report_type == 0) && (bufsize > 0)) {
             report_id = buffer[0];
             buffer++;
+            bufsize--;
         }
         handle_set_report0(report_id, buffer, bufsize);
     } else {
@@ -222,6 +235,9 @@ void tud_hid_set_protocol_cb(uint8_t instance, uint8_t protocol) {
 }
 
 void tud_mount_cb() {
+    if (our_descriptor_number == SWITCH_PRO_DESCRIPTOR_INDEX) {
+        switch_pro_reset();
+    }
     reset_resolution_multiplier();
     if (boot_protocol_keyboard) {
         boot_protocol_keyboard = false;

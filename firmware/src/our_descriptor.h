@@ -13,7 +13,8 @@
 
 #define MAX_INPUT_REPORT_ID 3
 
-#define NOUR_DESCRIPTORS 6
+#define NOUR_DESCRIPTORS 7
+#define SWITCH_PRO_DESCRIPTOR_INDEX 6
 
 typedef void (*device_connected_t)(uint16_t interface, uint16_t vid, uint16_t pid);
 typedef void (*device_disconnected_t)(uint8_t dev_addr);
@@ -33,6 +34,8 @@ struct our_descriptor_def_t {
     uint8_t idx;
     const uint8_t* descriptor;
     uint32_t descriptor_length;
+    const uint8_t* usb_descriptor = nullptr;
+    uint32_t usb_descriptor_length = 0;
     uint16_t vid = 0;
     uint16_t pid = 0;
     device_connected_t device_connected = nullptr;

@@ -4,6 +4,7 @@
 #include "our_descriptor.h"
 #include "ps_auth.h"
 #include "remapper.h"
+#include "switch_pro.h"
 
 const uint8_t REPORT_ID_MOUSE = 1;
 const uint8_t REPORT_ID_KEYBOARD = 2;
@@ -695,6 +696,21 @@ const our_descriptor_def_t our_descriptors[] = {
         .handle_received_report = do_handle_received_report,
         .clear_report = xac_compat_clear_report,
         .default_value = ps4_stadia_default_value,  // sic
+    },
+    {
+        .idx = SWITCH_PRO_DESCRIPTOR_INDEX,
+        // Keep saved HORI mappings while exposing the Pro protocol to the USB host.
+        .descriptor = our_report_descriptor_horipad,
+        .descriptor_length = sizeof(our_report_descriptor_horipad),
+        .usb_descriptor = switch_pro_report_descriptor,
+        .usb_descriptor_length = switch_pro_report_descriptor_length,
+        .vid = 0x057E,
+        .pid = 0x2009,
+        .main_loop_task = switch_pro_task,
+        .handle_received_report = do_handle_received_report,
+        .handle_set_report = switch_pro_handle_set_report,
+        .clear_report = horipad_clear_report,
+        .default_value = horipad_default_value,
     },
 };
 
