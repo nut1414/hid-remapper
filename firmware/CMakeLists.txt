@@ -38,6 +38,7 @@ add_executable(remapper
     src/our_descriptor.cc
     src/switch_pro.cc
     src/switch2_pro.cc
+    src/switch2_motion.cc
     src/aes128.cc
     src/globals.cc
     src/config.cc
@@ -98,6 +99,7 @@ add_executable(remapper_dual_a
     src/our_descriptor.cc
     src/switch_pro.cc
     src/switch2_pro.cc
+    src/switch2_motion.cc
     src/aes128.cc
     src/globals.cc
     src/config.cc
@@ -171,6 +173,7 @@ add_executable(remapper_serial
     src/our_descriptor.cc
     src/switch_pro.cc
     src/switch2_pro.cc
+    src/switch2_motion.cc
     src/aes128.cc
     src/globals.cc
     src/config.cc

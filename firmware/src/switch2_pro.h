@@ -18,6 +18,8 @@ constexpr uint8_t SWITCH2_PRO_FACTORY_DATA_LEN = 64;
 
 void switch2_pro_reset();
 void switch2_pro_task();
+// Call after each host input report is decoded.
+void switch2_pro_input_decoded();
 
 // Handles one complete command; returns the reply length (0 = no reply).
 uint16_t switch2_pro_command(const uint8_t* request, uint16_t len, uint8_t* reply);

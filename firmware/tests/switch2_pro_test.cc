@@ -131,4 +131,18 @@ int main() {
     switch2_pro_task();
     assert(last_id == 0x05 && last_report[4] == 0x08 && last_report[7] == 0x02);  // A, GL
     assert(last_report[0x1f] == 0xa5 && last_report[0x20] == 0x0e);
+    assert(last_report[0x2a + 10] == 0 && last_report[0x2a + 11] == 0);  // No motion yet
+
+    // Motion once the console enables it: resting flat is 1 g on Z.
+    command(bytes({ 0x0c, 0x91, 0x00, 0x04, 0x00, 0x04, 0, 0 }, { 0x04, 0, 0, 0 }));
+    switch2_pro_input_decoded();
+    now_us += 4000;
+    switch2_pro_task();
+    assert(last_id == 0x05);
+    int16_t az = int16_t(last_report[0x2a + 10] | (last_report[0x2a + 11] << 8));
+    assert(az == 4096);
+    command(bytes({ 0x03, 0x91, 0x00, 0x0a, 0x00, 0x04, 0, 0 }, { 0x09, 0, 0, 0 }));
+    now_us += 4000;
+    switch2_pro_task();
+    assert(last_id == 0x09 && last_report[0x0e] == 30 && last_report[0x0f + 3] == 12);
 }

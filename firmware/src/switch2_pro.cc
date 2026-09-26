@@ -1,9 +1,11 @@
+#include <cmath>
 #include <cstring>
 
 #include <tusb.h>
 
 #include "aes128.h"
 #include "platform.h"
+#include "switch2_motion.h"
 #include "switch2_pro.h"
 #include "switch_pro.h"
 
@@ -141,6 +143,9 @@ uint8_t feature_mask = 0;
 uint8_t features_enabled = 0;
 uint32_t counter = 0;
 uint64_t last_report_us = 0;
+uint64_t last_motion_us = 0;
+uint64_t motion_start_us = 0;
+uint16_t last_sample = 0;
 uint8_t host_key[16];
 uint8_t rx[256];
 uint16_t rx_len = 0;
@@ -354,6 +359,43 @@ uint16_t other_command(uint8_t command, uint8_t sub, const uint8_t* data, uint8_
     }
 }
 
+bool motion_active() {
+    return feature_mask & features_enabled & FEATURE_MOTION;
+}
+
+int16_t clamp16(float value) {
+    if (value > 32767) return 32767;
+    if (value < -32768) return -32768;
+    return int16_t(lroundf(value));
+}
+
+// Report 0x05 motion: timestamp (us), temperature, accelerometer (+/-8 g),
+// gyro (+/-2000 deg/s).
+void put_motion_05(uint8_t* out, uint32_t timestamp_us) {
+    switch2_motion_t motion;
+    switch2_motion_get(&motion);
+    put32(out, timestamp_us);
+    for (uint8_t i = 0; i < 3; i++) {
+        put16(out + 6 + i * 2, clamp16(motion.accel[i] * 4096));
+        put16(out + 12 + i * 2, clamp16(motion.gyro_dps[i] * 32767 / 2000));
+    }
+}
+
+// Report 0x09 motion: sample number and samples since the last report (in
+// 1.25 ms units), mode 12, then the packed orientation.
+void put_motion_09(uint8_t* out, uint32_t timestamp_us) {
+    switch2_motion_t motion;
+    switch2_motion_get(&motion);
+    uint16_t sample = timestamp_us / 1250;
+    uint16_t delta = sample - last_sample;
+    last_sample = sample;
+    out[0] = sample;
+    out[1] = ((sample >> 8) & 0x0F) | ((delta << 4) & 0xF0);
+    out[2] = delta >> 4;
+    out[3] = 12;
+    switch2_motion_pack_mode12(motion, out + 4);
+}
+
 uint32_t report_09_bits(const switch_pro_input_t& input) {
     uint32_t out = 0;
     for (auto const& map : report_09_buttons) {
@@ -375,6 +417,23 @@ void switch2_pro_reset() {
     last_report_us = 0;
     memset(host_key, 0, sizeof(host_key));
     rx_len = 0;
+    last_motion_us = 0;
+    motion_start_us = get_time();
+    last_sample = 0;
+    switch2_motion_reset();
+}
+
+void switch2_pro_input_decoded() {
+    uint64_t now = get_time();
+    float dt = last_motion_us ? (now - last_motion_us) * 1e-6f : 0;
+    if (dt > 0.05f) dt = 0.05f;  // After a gap, don't integrate a stale rate
+    last_motion_us = now;
+    switch_pro_input_t input;
+    switch_pro_get_input(&input);
+    int32_t pad_x;
+    int32_t pad_y;
+    switch_pro_take_pad_aim(&pad_x, &pad_y);
+    switch2_motion_update(input.accel, input.gyro, input.motion, pad_x, pad_y, dt);
 }
 
 uint16_t switch2_pro_command(const uint8_t* request, uint16_t len, uint8_t* reply) {
@@ -446,6 +505,7 @@ uint8_t switch2_pro_build_report(uint8_t* out) {
         put16(out + 0x1F, 0x0EA5);  // Battery voltage
         out[0x21] = 0x20;           // Charged
         out[0x29] = 0x01;
+        if (motion_active()) put_motion_05(out + 0x2A, get_time() - motion_start_us);
         return 0x05;
     }
     uint32_t buttons = report_09_bits(input);
@@ -457,6 +517,10 @@ uint8_t switch2_pro_build_report(uint8_t* out) {
     pack_stick(out + 5, input.sticks[0], input.sticks[1]);
     pack_stick(out + 8, input.sticks[2], input.sticks[3]);
     out[0x0B] = feature_mask & FEATURE_RUMBLE ? 0x38 : 0x30;
+    if (motion_active()) {
+        out[0x0E] = 30;
+        put_motion_09(out + 0x0F, get_time() - motion_start_us);
+    }
     return 0x09;
 }
 

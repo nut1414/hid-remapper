@@ -479,6 +479,17 @@ void switch_pro_get_input(switch_pro_input_t* out) {
     out->sticks[1] = stick_axis(horipad[4], true);
     out->sticks[2] = stick_axis(horipad[5], false);
     out->sticks[3] = stick_axis(horipad[6], true);
+    out->motion = last_imu_us && get_time() - last_imu_us < 100000;
+    for (uint8_t i = 0; i < 3; i++) {
+        out->accel[i] = imu[i];
+        out->gyro[i] = imu[3 + i];
+    }
+}
+
+void switch_pro_take_pad_aim(int32_t* x, int32_t* y) {
+    *x = aim_x;
+    *y = aim_y;
+    aim_x = aim_y = 0;
 }
 
 void switch_pro_report_complete(uint8_t report_id) {
