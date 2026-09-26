@@ -1,3 +1,4 @@
+#include <cstdlib>
 #include <set>
 #include <unordered_map>
 #include <unordered_set>
@@ -45,6 +46,15 @@
 #define SWITCH_PRO_CAL_OFFSET_IN_FLASH (CONFIG_OFFSET_IN_FLASH - FLASH_SECTOR_SIZE)
 
 #define ADC_USAGE_PAGE 0xFFF80000
+
+// libstdc++'s default terminate handler prints the exception type through
+// the C++ demangler, which pulls ~32 KB of code into RAM in this copy-to-RAM
+// build and leaves too little heap. Nothing reads that message anyway.
+namespace __gnu_cxx {
+void __verbose_terminate_handler() {
+    abort();
+}
+}  // namespace __gnu_cxx
 
 uint64_t next_print = 0;
 
