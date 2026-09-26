@@ -2,6 +2,7 @@
 
 #include <tusb.h>
 
+#include "crc.h"
 #include "platform.h"
 #include "switch_pro.h"
 
@@ -41,6 +42,15 @@ namespace {
 constexpr uint8_t REPORT_LEN = 63;
 constexpr uint8_t REPLY_QUEUE_LEN = 16;
 constexpr uint64_t STREAM_INTERVAL_US = 4000;
+// A button or d-pad change may pre-empt the stream once the previous report
+// has had a USB frame to be read. The stream then restarts from that report,
+// so the steady report rate (which motion is tuned for) stays the same. The
+// console integrates gyro per report rather than per elapsed time, so an early
+// report scales its gyro by the time it actually covers.
+constexpr uint64_t BUTTON_MIN_INTERVAL_US = 1000;
+// The console writes calibration in bursts; save once it has been quiet.
+constexpr uint64_t CAL_SAVE_DELAY_US = 250000;
+constexpr uint32_t CAL_MAGIC = 0x31435053;  // "SPC1"
 
 struct reply_t {
     uint8_t id;
@@ -56,11 +66,38 @@ uint8_t horipad[8] = { 0, 0, 0x0F, 0x80, 0x80, 0x80, 0x80, 0 };
 int16_t imu[6] = { 0, 0, 16384, 0, 0, 0 };
 uint8_t user_cal[256];
 bool user_cal_initialized = false;
+bool user_cal_dirty = false;
+uint64_t user_cal_changed_us = 0;
+uint8_t cal_image[SWITCH_PRO_CAL_IMAGE_SIZE];
 uint64_t last_imu_us = 0;
 uint64_t last_stream_us = 0;
 uint8_t timer_byte = 0;
 uint8_t input_mode = 0;
 bool imu_enabled = false;
+uint32_t sent_buttons = 0;
+bool buttons_changed = false;
+
+// Latency counters, read and cleared through the config interface. Times are
+// measured from a host input report arriving to the Pro report that carries
+// it being read by the console.
+switch_pro_latency_stats_t stats;
+uint64_t last_input_us = 0;
+uint64_t pending_input_us = 0;
+uint64_t pending_button_us = 0;
+uint64_t in_flight_input_us = 0;
+uint64_t in_flight_button_us = 0;
+
+uint16_t clamp_us(uint64_t value) {
+    return value > 0xFFFF ? 0xFFFF : value;
+}
+
+void record_latency(uint64_t since, uint64_t now, uint16_t& count, uint32_t& sum, uint16_t& max) {
+    if (!since) return;
+    uint16_t latency = clamp_us(now - since);
+    if (count < 0xFFFF) count++;
+    sum += latency;
+    if (latency > max) max = latency;
+}
 
 void enqueue(uint8_t id, const uint8_t* payload, uint8_t len) {
     if (reply_count == REPLY_QUEUE_LEN) {
@@ -137,7 +174,7 @@ void put16(uint8_t* dst, int16_t value) {
     dst[1] = (uint16_t(value) >> 8) & 0xFF;
 }
 
-void full_input(uint8_t* out) {
+void full_input(uint8_t* out, uint64_t covered_us) {
     memset(out, 0, REPORT_LEN);
     input_prefix(out);
     if (!imu_enabled) return;
@@ -151,6 +188,11 @@ void full_input(uint8_t* out) {
     int32_t gx = fresh ? imu[3] : 0;
     int32_t gy = fresh ? imu[4] : 0;
     int32_t gz = fresh ? imu[5] : 0;
+    if (covered_us < STREAM_INTERVAL_US) {
+        gx = gx * int32_t(covered_us) / int32_t(STREAM_INTERVAL_US);
+        gy = gy * int32_t(covered_us) / int32_t(STREAM_INTERVAL_US);
+        gz = gz * int32_t(covered_us) / int32_t(STREAM_INTERVAL_US);
+    }
     int16_t sample[6] = {
         clamp16(ay / 4), clamp16(-ax / 4), clamp16(az / 4),
         clamp16(gy * 4 / 5), clamp16(-gx * 9 / 10), clamp16(gz * 9 / 10),
@@ -160,6 +202,26 @@ void full_input(uint8_t* out) {
             put16(out + 12 + n * 12 + axis * 2, sample[axis]);
         }
     }
+}
+
+void load_user_cal() {
+    const uint8_t* image = get_persisted_switch_pro_cal();
+    uint32_t magic;
+    uint32_t crc;
+    memcpy(&magic, image, 4);
+    memcpy(&crc, image + 4 + sizeof(user_cal), 4);
+    if (magic == CAL_MAGIC && crc == crc32(image, 4 + sizeof(user_cal))) {
+        memcpy(user_cal, image + 4, sizeof(user_cal));
+    }
+}
+
+void save_user_cal() {
+    memset(cal_image, 0xFF, sizeof(cal_image));
+    memcpy(cal_image, &CAL_MAGIC, 4);
+    memcpy(cal_image + 4, user_cal, sizeof(user_cal));
+    uint32_t crc = crc32(cal_image, 4 + sizeof(user_cal));
+    memcpy(cal_image + 4 + sizeof(user_cal), &crc, 4);
+    do_persist_switch_pro_cal(cal_image);
 }
 
 void pack12(uint8_t* dst, const uint16_t* values) {
@@ -249,15 +311,18 @@ void subcommand(uint8_t sub, const uint8_t* args, uint16_t len) {
             for (uint8_t i = 0; i < read_len; i++) reply[19 + i] = spi_byte(address + i);
             break;
         }
-        case 0x11: {  // SPI user calibration write (kept until power is removed)
+        case 0x11: {  // SPI user calibration write (saved to flash)
             if (len < 5) break;
             uint32_t address = uint32_t(args[0]) | (uint32_t(args[1]) << 8) |
                                (uint32_t(args[2]) << 16) | (uint32_t(args[3]) << 24);
             uint16_t write_len = args[4];
             if (write_len > len - 5) write_len = len - 5;
             for (uint16_t i = 0; i < write_len; i++) {
-                if (address + i >= 0x8000 && address + i < 0x8100) {
+                if (address + i >= 0x8000 && address + i < 0x8100 &&
+                    user_cal[address + i - 0x8000] != args[5 + i]) {
                     user_cal[address + i - 0x8000] = args[5 + i];
+                    user_cal_dirty = true;
+                    user_cal_changed_us = get_time();
                 }
             }
             break;
@@ -282,14 +347,48 @@ void switch_pro_reset() {
     imu_enabled = false;
     last_stream_us = 0;
     timer_byte = 0;
+    sent_buttons = 0;
+    buttons_changed = false;
+    pending_input_us = pending_button_us = 0;
+    in_flight_input_us = in_flight_button_us = 0;
     if (!user_cal_initialized) {
         memset(user_cal, 0xFF, sizeof(user_cal));
+        load_user_cal();
         user_cal_initialized = true;
     }
 }
 
 void switch_pro_update_horipad(const uint8_t* report, uint16_t len) {
-    if (len >= sizeof(horipad)) memcpy(horipad, report, sizeof(horipad));
+    if (len < sizeof(horipad)) return;
+    memcpy(horipad, report, sizeof(horipad));
+    if (buttons_from_horipad() != sent_buttons && !buttons_changed) {
+        buttons_changed = true;
+        pending_button_us = last_input_us;
+    }
+}
+
+void switch_pro_input_received() {
+    uint64_t now = get_time();
+    if (last_input_us) {
+        uint16_t gap = clamp_us(now - last_input_us);
+        if (gap > stats.input_gap_max_us) stats.input_gap_max_us = gap;
+    }
+    stats.inputs++;
+    last_input_us = now;
+    if (!pending_input_us) pending_input_us = now;
+}
+
+void switch_pro_report_complete(uint8_t report_id) {
+    if (report_id != 0x30) return;
+    uint64_t now = get_time();
+    record_latency(in_flight_input_us, now, stats.input_count, stats.input_sum_us, stats.input_max_us);
+    record_latency(in_flight_button_us, now, stats.button_count, stats.button_sum_us, stats.button_max_us);
+    in_flight_input_us = in_flight_button_us = 0;
+}
+
+void switch_pro_get_latency_stats(switch_pro_latency_stats_t* out) {
+    *out = stats;
+    memset(&stats, 0, sizeof(stats));
 }
 
 void switch_pro_imu_input(uint32_t usage, int32_t value) {
@@ -323,6 +422,12 @@ void switch_pro_handle_set_report(uint8_t report_id, const uint8_t* buffer, uint
 }
 
 void switch_pro_task() {
+    // Flash writes stall the CPU, so wait until replies are out and the
+    // console has stopped writing.
+    if (user_cal_dirty && !reply_count && get_time() - user_cal_changed_us >= CAL_SAVE_DELAY_US) {
+        user_cal_dirty = false;
+        save_user_cal();
+    }
     if (!tud_hid_n_ready(0)) return;
     if (reply_count) {
         reply_t& reply = replies[reply_head];
@@ -334,8 +439,18 @@ void switch_pro_task() {
     }
     if (input_mode != 0x30) return;
     uint64_t now = get_time();
-    if (now - last_stream_us < STREAM_INTERVAL_US) return;
+    uint64_t elapsed = now - last_stream_us;
+    bool early = buttons_changed && elapsed >= BUTTON_MIN_INTERVAL_US;
+    if (elapsed < STREAM_INTERVAL_US && !early) return;
     uint8_t report[REPORT_LEN];
-    full_input(report);
-    if (tud_hid_n_report(0, 0x30, report, sizeof(report))) last_stream_us = now;
+    full_input(report, elapsed);
+    if (!tud_hid_n_report(0, 0x30, report, sizeof(report))) return;
+    last_stream_us = now;
+    sent_buttons = buttons_from_horipad();
+    buttons_changed = false;
+    stats.reports++;
+    if (early && elapsed < STREAM_INTERVAL_US) stats.early_reports++;
+    in_flight_input_us = pending_input_us;
+    in_flight_button_us = pending_button_us;
+    pending_input_us = pending_button_us = 0;
 }

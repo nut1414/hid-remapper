@@ -9,6 +9,7 @@
 #include "our_descriptor.h"
 #include "platform.h"
 #include "remapper.h"
+#include "switch_pro.h"
 
 const uint8_t CONFIG_VERSION = 18;
 
@@ -934,6 +935,12 @@ uint16_t handle_get_report1(uint8_t report_id, uint8_t* buffer, uint16_t reqlen)
                 my_mutex_exit(MutexId::QUIRKS);
                 break;
             }
+            case ConfigCommand::GET_LATENCY_STATS: {
+                switch_pro_latency_stats_t stats;
+                switch_pro_get_latency_stats(&stats);
+                memcpy(config_buffer->data, &stats, sizeof(stats));
+                break;
+            }
             case ConfigCommand::PERSIST_CONFIG: {
                 persist_config_response_t* returned = (persist_config_response_t*) config_buffer;
                 if (persist_config_return_code == PersistConfigReturnCode::UNKNOWN) {
@@ -987,6 +994,7 @@ void handle_set_report1(uint8_t report_id, uint8_t const* buffer, uint16_t bufsi
                     break;
                 }
                 case ConfigCommand::GET_CONFIG:
+                case ConfigCommand::GET_LATENCY_STATS:
                     break;
                 case ConfigCommand::CLEAR_MAPPING:
                     config_mappings.clear();

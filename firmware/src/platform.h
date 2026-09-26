@@ -5,6 +5,9 @@
 #include <types.h>
 
 void do_persist_config(uint8_t* buffer);
+// Switch Pro user calibration image, SWITCH_PRO_CAL_IMAGE_SIZE bytes.
+void do_persist_switch_pro_cal(const uint8_t* buffer);
+const uint8_t* get_persisted_switch_pro_cal();
 
 void reset_to_bootloader();
 void pair_new_device();

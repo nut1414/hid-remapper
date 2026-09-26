@@ -27,6 +27,7 @@
 #include "our_descriptor.h"
 #include "platform.h"
 #include "remapper.h"
+#include "switch_pro.h"
 #include "tick.h"
 
 // RP2350 UF2s wipe the last sector of flash every time
@@ -39,6 +40,9 @@
 #endif
 
 #define FLASH_CONFIG_IN_MEMORY (((uint8_t*) XIP_BASE) + CONFIG_OFFSET_IN_FLASH)
+
+// Switch Pro user calibration gets its own sector below the config.
+#define SWITCH_PRO_CAL_OFFSET_IN_FLASH (CONFIG_OFFSET_IN_FLASH - FLASH_SECTOR_SIZE)
 
 #define ADC_USAGE_PAGE 0xFFF80000
 
@@ -197,6 +201,21 @@ void do_persist_config(uint8_t* buffer) {
 #if !PICO_COPY_TO_RAM
     restore_interrupts(ints);
 #endif
+}
+
+void do_persist_switch_pro_cal(const uint8_t* buffer) {
+#if !PICO_COPY_TO_RAM
+    uint32_t ints = save_and_disable_interrupts();
+#endif
+    flash_range_erase(SWITCH_PRO_CAL_OFFSET_IN_FLASH, FLASH_SECTOR_SIZE);
+    flash_range_program(SWITCH_PRO_CAL_OFFSET_IN_FLASH, buffer, SWITCH_PRO_CAL_IMAGE_SIZE);
+#if !PICO_COPY_TO_RAM
+    restore_interrupts(ints);
+#endif
+}
+
+const uint8_t* get_persisted_switch_pro_cal() {
+    return ((const uint8_t*) XIP_BASE) + SWITCH_PRO_CAL_OFFSET_IN_FLASH;
 }
 
 void reset_to_bootloader() {

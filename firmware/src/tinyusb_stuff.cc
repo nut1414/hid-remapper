@@ -234,6 +234,12 @@ void tud_hid_set_protocol_cb(uint8_t instance, uint8_t protocol) {
     boot_protocol_updated = true;
 }
 
+void tud_hid_report_complete_cb(uint8_t instance, uint8_t const* report, uint16_t len) {
+    if (instance == 0 && len > 0 && our_descriptor_number == SWITCH_PRO_DESCRIPTOR_INDEX) {
+        switch_pro_report_complete(report[0]);
+    }
+}
+
 void tud_mount_cb() {
     if (our_descriptor_number == SWITCH_PRO_DESCRIPTOR_INDEX) {
         switch_pro_reset();

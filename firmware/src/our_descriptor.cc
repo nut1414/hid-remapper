@@ -564,6 +564,11 @@ bool kb_mouse_should_cause_wakeup(uint8_t report_id, const uint8_t* buffer, uint
 
 static const uint8_t horipad_neutral[] = { 0x00, 0x00, 0x0F, 0x80, 0x80, 0x80, 0x80, 0x00 };
 
+void switch_pro_handle_received_report(const uint8_t* report, int len, uint16_t interface, uint8_t external_report_id) {
+    switch_pro_input_received();
+    do_handle_received_report(report, len, interface, external_report_id);
+}
+
 void horipad_clear_report(uint8_t* report, uint8_t report_id, uint16_t len) {
     memcpy(report, horipad_neutral, sizeof(horipad_neutral));
 }
@@ -707,7 +712,7 @@ const our_descriptor_def_t our_descriptors[] = {
         .vid = 0x057E,
         .pid = 0x2009,
         .main_loop_task = switch_pro_task,
-        .handle_received_report = do_handle_received_report,
+        .handle_received_report = switch_pro_handle_received_report,
         .handle_set_report = switch_pro_handle_set_report,
         .clear_report = horipad_clear_report,
         .default_value = horipad_default_value,

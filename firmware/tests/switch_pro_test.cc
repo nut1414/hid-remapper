@@ -2,19 +2,29 @@
 #include <cstdint>
 #include <cstring>
 
+#include "crc.h"
 #include "switch_pro.h"
 
 static uint64_t now_us = 0;
 static uint8_t last_id = 0;
 static uint8_t last_payload[63];
 static uint16_t last_len = 0;
+static int report_count = 0;
+static uint8_t flash_cal[SWITCH_PRO_CAL_IMAGE_SIZE];
+static int flash_writes = 0;
 
 uint64_t get_time() { return now_us; }
 uint64_t get_unique_id() { return 0x123456789ABCDEF0ULL; }
+void do_persist_switch_pro_cal(const uint8_t* buffer) {
+    memcpy(flash_cal, buffer, sizeof(flash_cal));
+    flash_writes++;
+}
+const uint8_t* get_persisted_switch_pro_cal() { return flash_cal; }
 bool tud_hid_n_ready(uint8_t) { return true; }
 bool tud_hid_n_report(uint8_t, uint8_t id, const void* payload, uint16_t len) {
     last_id = id;
     last_len = len;
+    report_count++;
     memcpy(last_payload, payload, len);
     return true;
 }
@@ -23,8 +33,32 @@ static int16_t sample_at(uint8_t offset) {
     return int16_t(uint16_t(last_payload[offset]) | (uint16_t(last_payload[offset + 1]) << 8));
 }
 
+static void read_user_cal(uint8_t* out) {
+    uint8_t spi_read[15] = {};
+    spi_read[9] = 0x10;
+    spi_read[10] = 0x26;
+    spi_read[11] = 0x80;
+    spi_read[14] = 4;
+    switch_pro_handle_set_report(0x01, spi_read, sizeof(spi_read));
+    switch_pro_task();
+    assert(last_id == 0x21 && last_payload[12] == 0x90 && last_payload[18] == 4);
+    memcpy(out, last_payload + 19, 4);
+}
+
 int main() {
+    // Calibration saved by an earlier session is loaded at the first reset.
+    const uint32_t magic = 0x31435053;
+    memset(flash_cal, 0xFF, sizeof(flash_cal));
+    memcpy(flash_cal, &magic, 4);
+    flash_cal[4 + 0x26] = 0xB2;
+    flash_cal[4 + 0x27] = 0xA1;
+    uint32_t crc = crc32(flash_cal, 4 + 256);
+    memcpy(flash_cal + 4 + 256, &crc, 4);
     switch_pro_reset();
+    uint8_t cal[4];
+    read_user_cal(cal);
+    assert(cal[0] == 0xB2 && cal[1] == 0xA1 && cal[2] == 0xFF);
+
     const uint8_t handshake[] = { 0x01 };
     switch_pro_handle_set_report(0x80, handshake, sizeof(handshake));
     switch_pro_task();
@@ -66,6 +100,69 @@ int main() {
         assert(sample_at(base + 8) == -90);
         assert(sample_at(base + 10) == 270);
     }
+
+    // A button change pre-empts the 4 ms stream after one USB frame and
+    // restarts the stream from that report.
+    switch_pro_report_complete(0x30);
+    switch_pro_latency_stats_t stats;
+    switch_pro_get_latency_stats(&stats);
+    int sent = report_count;
+    now_us = 4400;
+    switch_pro_input_received();
+    gamepad[0] = 0x02;  // B
+    switch_pro_update_horipad(gamepad, sizeof(gamepad));
+    now_us = 4500;
+    switch_pro_task();
+    assert(report_count == sent);  // Too soon after the last report
+    now_us = 5000;
+    switch_pro_task();
+    assert(report_count == sent + 1 && last_id == 0x30 && (last_payload[2] & 4));
+    // The early report covers 1 ms of a 4 ms slot, so its gyro is scaled to a
+    // quarter; acceleration is not scaled.
+    assert(sample_at(12) == 500 && sample_at(16) == 4096);
+    assert(sample_at(18) == 40 && sample_at(20) == -22 && sample_at(22) == 67);
+    now_us = 5300;
+    switch_pro_report_complete(0x30);
+    now_us = 8000;
+    switch_pro_task();
+    assert(report_count == sent + 1);  // No change, no early report
+    now_us = 9000;
+    switch_pro_task();
+    assert(report_count == sent + 2);  // Stream resumes 4 ms after the early report
+    switch_pro_get_latency_stats(&stats);
+    assert(stats.inputs == 1 && stats.reports == 2 && stats.early_reports == 1);
+    assert(stats.button_count == 1 && stats.button_sum_us == 900 && stats.button_max_us == 900);
+    assert(stats.input_count == 1 && stats.input_sum_us == 900);
+
+    // Calibration writes are saved once the console has been quiet for 250 ms,
+    // and only when they change something.
+    uint8_t spi_write[19] = {};
+    spi_write[9] = 0x11;
+    spi_write[10] = 0x28;
+    spi_write[11] = 0x80;
+    spi_write[14] = 4;
+    spi_write[15] = 0x12;
+    spi_write[16] = 0x34;
+    spi_write[17] = 0x56;
+    spi_write[18] = 0x78;
+    now_us = 100000;
+    switch_pro_handle_set_report(0x01, spi_write, sizeof(spi_write));
+    switch_pro_task();
+    assert(last_id == 0x21 && flash_writes == 0);
+    now_us = 300000;
+    switch_pro_task();
+    assert(flash_writes == 0);
+    now_us = 350000;
+    switch_pro_task();
+    assert(flash_writes == 1);
+    assert(flash_cal[4 + 0x28] == 0x12 && flash_cal[4 + 0x2B] == 0x78 && flash_cal[4 + 0x26] == 0xB2);
+    crc = crc32(flash_cal, 4 + 256);
+    assert(!memcmp(&crc, flash_cal + 4 + 256, 4));
+    switch_pro_handle_set_report(0x01, spi_write, sizeof(spi_write));
+    now_us = 700000;
+    switch_pro_task();
+    switch_pro_task();
+    assert(flash_writes == 1);  // Same data, no flash write
 
     uint8_t spi_read[15] = {};
     spi_read[9] = 0x10;
