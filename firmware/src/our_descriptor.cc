@@ -567,6 +567,7 @@ static const uint8_t horipad_neutral[] = { 0x00, 0x00, 0x0F, 0x80, 0x80, 0x80, 0
 void switch_pro_handle_received_report(const uint8_t* report, int len, uint16_t interface, uint8_t external_report_id) {
     switch_pro_input_received();
     do_handle_received_report(report, len, interface, external_report_id);
+    switch_pro_input_decoded();
 }
 
 void horipad_clear_report(uint8_t* report, uint8_t report_id, uint16_t len) {

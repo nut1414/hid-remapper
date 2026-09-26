@@ -1,3 +1,4 @@
+#include <cmath>
 #include <cstring>
 
 #include <tusb.h>
@@ -52,6 +53,27 @@ constexpr uint64_t BUTTON_MIN_INTERVAL_US = 1000;
 constexpr uint64_t CAL_SAVE_DELAY_US = 250000;
 constexpr uint32_t CAL_MAGIC = 0x31435053;  // "SPC1"
 
+// Touchpads: axes span +/-32767 and read 0,0 when untouched. They have no
+// click switch, so a click is pressure crossing a threshold (with hysteresis).
+constexpr int32_t PAD_PRESS = 4000;
+constexpr int32_t PAD_RELEASE = 2500;
+// Right pad movement is added to the gyro as rotation: one gyro count per
+// this many pad units.
+constexpr int32_t PAD_AIM_DIVISOR = 1;
+// The console fuses gyro with gravity from the accelerometer, which pulls pad
+// pitch back to the real tilt. So the accelerometer is rotated by the pitch
+// the pad has added. Radians per gyro count in one report, assuming the
+// console integrates 3 samples of 5 ms at the calibrated 936/13371 dps/count.
+constexpr float PAD_AIM_RAD_PER_COUNT = 3 * 0.005f * (936.0f / 13371.0f) * (3.14159265f / 180);
+constexpr float PAD_PITCH_LIMIT = 1.4f;  // About 80 degrees
+// Left pad d-pad: how far from the centre a press must be to count.
+constexpr int32_t PAD_DPAD_THRESHOLD = 12000;
+constexpr uint32_t PRO_ZR = 1u << 7;
+constexpr uint32_t PRO_DOWN = 1u << 16;
+constexpr uint32_t PRO_UP = 1u << 17;
+constexpr uint32_t PRO_RIGHT = 1u << 18;
+constexpr uint32_t PRO_LEFT = 1u << 19;
+
 struct reply_t {
     uint8_t id;
     uint8_t payload[REPORT_LEN];
@@ -86,6 +108,19 @@ uint64_t pending_input_us = 0;
 uint64_t pending_button_us = 0;
 uint64_t in_flight_input_us = 0;
 uint64_t in_flight_button_us = 0;
+
+struct pad_t {
+    int32_t x, y, pressure;
+    int32_t prev_x, prev_y;
+    bool touching;
+    bool pressed;
+};
+pad_t left_pad;
+pad_t right_pad;
+uint32_t pad_buttons = 0;
+int32_t aim_x = 0;  // Right pad movement not yet sent as rotation
+int32_t aim_y = 0;
+float pad_pitch = 0;  // Radians of pitch added by the pad so far
 
 uint16_t clamp_us(uint64_t value) {
     return value > 0xFFFF ? 0xFFFF : value;
@@ -151,10 +186,30 @@ uint32_t buttons_from_horipad() {
     return out;
 }
 
+uint32_t current_buttons() {
+    return buttons_from_horipad() | pad_buttons;
+}
+
+void update_pad(pad_t& pad) {
+    pad.touching = pad.x || pad.y;
+    if (pad.pressure >= PAD_PRESS) pad.pressed = true;
+    if (pad.pressure <= PAD_RELEASE) pad.pressed = false;
+}
+
+uint32_t left_pad_dpad() {
+    if (!left_pad.pressed || !left_pad.touching) return 0;
+    uint32_t out = 0;
+    if (left_pad.y > PAD_DPAD_THRESHOLD) out |= PRO_UP;
+    if (left_pad.y < -PAD_DPAD_THRESHOLD) out |= PRO_DOWN;
+    if (left_pad.x > PAD_DPAD_THRESHOLD) out |= PRO_RIGHT;
+    if (left_pad.x < -PAD_DPAD_THRESHOLD) out |= PRO_LEFT;
+    return out;
+}
+
 void input_prefix(uint8_t* out) {
     out[0] = timer_byte++;
     out[1] = 0x80;  // Full battery, not charging
-    uint32_t buttons = buttons_from_horipad();
+    uint32_t buttons = current_buttons();
     out[2] = buttons;
     out[3] = buttons >> 8;
     out[4] = buttons >> 16;
@@ -172,6 +227,15 @@ int16_t clamp16(int32_t value) {
 void put16(uint8_t* dst, int16_t value) {
     dst[0] = value & 0xFF;
     dst[1] = (uint16_t(value) >> 8) & 0xFF;
+}
+
+// Adds as much pending pad movement to a gyro sample as fits in 16 bits; the
+// rest goes out with the next report.
+int16_t add_aim(int32_t base, int32_t& pending, int32_t sign) {
+    int32_t counts = sign * (pending / PAD_AIM_DIVISOR);
+    int32_t sample = clamp16(base + counts);
+    pending -= sign * (sample - base) * PAD_AIM_DIVISOR;
+    return sample;
 }
 
 void full_input(uint8_t* out, uint64_t covered_us) {
@@ -193,10 +257,32 @@ void full_input(uint8_t* out, uint64_t covered_us) {
         gy = gy * int32_t(covered_us) / int32_t(STREAM_INTERVAL_US);
         gz = gz * int32_t(covered_us) / int32_t(STREAM_INTERVAL_US);
     }
+    // Pad aim is a distance rather than a rate, so it is not scaled with the
+    // time an early report covers. Pad right turns right (negative yaw), pad
+    // up looks up (negative pitch).
     int16_t sample[6] = {
         clamp16(ay / 4), clamp16(-ax / 4), clamp16(az / 4),
-        clamp16(gy * 4 / 5), clamp16(-gx * 9 / 10), clamp16(gz * 9 / 10),
+        clamp16(gy * 4 / 5), 0, 0,
     };
+    int16_t pitch = clamp16(-gx * 9 / 10);
+    sample[4] = add_aim(pitch, aim_y, -1);
+    sample[5] = add_aim(clamp16(gz * 9 / 10), aim_x, -1);
+    // Pitch beyond the limit is dropped, as if aim had hit the ceiling.
+    float new_pitch = pad_pitch + (sample[4] - pitch) * PAD_AIM_RAD_PER_COUNT;
+    if (fabsf(new_pitch) > PAD_PITCH_LIMIT) {
+        new_pitch = copysignf(PAD_PITCH_LIMIT, new_pitch);
+        sample[4] = pitch + int32_t((new_pitch - pad_pitch) / PAD_AIM_RAD_PER_COUNT);
+    }
+    pad_pitch = new_pitch;
+    if (pad_pitch != 0) {
+        // Gravity seen from a controller pitched by pad_pitch about Y.
+        float c = cosf(pad_pitch);
+        float s = sinf(pad_pitch);
+        int32_t x = sample[0];
+        int32_t z = sample[2];
+        sample[0] = clamp16(lroundf(c * x - s * z));
+        sample[2] = clamp16(lroundf(s * x + c * z));
+    }
     for (uint8_t n = 0; n < 3; n++) {
         for (uint8_t axis = 0; axis < 6; axis++) {
             put16(out + 12 + n * 12 + axis * 2, sample[axis]);
@@ -351,6 +437,10 @@ void switch_pro_reset() {
     buttons_changed = false;
     pending_input_us = pending_button_us = 0;
     in_flight_input_us = in_flight_button_us = 0;
+    left_pad = right_pad = {};
+    pad_buttons = 0;
+    aim_x = aim_y = 0;
+    pad_pitch = 0;
     if (!user_cal_initialized) {
         memset(user_cal, 0xFF, sizeof(user_cal));
         load_user_cal();
@@ -361,7 +451,7 @@ void switch_pro_reset() {
 void switch_pro_update_horipad(const uint8_t* report, uint16_t len) {
     if (len < sizeof(horipad)) return;
     memcpy(horipad, report, sizeof(horipad));
-    if (buttons_from_horipad() != sent_buttons && !buttons_changed) {
+    if (current_buttons() != sent_buttons && !buttons_changed) {
         buttons_changed = true;
         pending_button_us = last_input_us;
     }
@@ -378,6 +468,26 @@ void switch_pro_input_received() {
     if (!pending_input_us) pending_input_us = now;
 }
 
+void switch_pro_input_decoded() {
+    update_pad(left_pad);
+    // Movement counts only between two touching samples, so a new touch
+    // never jumps the aim.
+    bool was_touching = right_pad.touching;
+    update_pad(right_pad);
+    if (right_pad.touching && was_touching) {
+        aim_x += right_pad.x - right_pad.prev_x;
+        aim_y += right_pad.y - right_pad.prev_y;
+    }
+    right_pad.prev_x = right_pad.x;
+    right_pad.prev_y = right_pad.y;
+
+    pad_buttons = left_pad_dpad() | (right_pad.pressed ? PRO_ZR : 0);
+    if (current_buttons() != sent_buttons && !buttons_changed) {
+        buttons_changed = true;
+        pending_button_us = last_input_us;
+    }
+}
+
 void switch_pro_report_complete(uint8_t report_id) {
     if (report_id != 0x30) return;
     uint64_t now = get_time();
@@ -391,11 +501,16 @@ void switch_pro_get_latency_stats(switch_pro_latency_stats_t* out) {
     memset(&stats, 0, sizeof(stats));
 }
 
-void switch_pro_imu_input(uint32_t usage, int32_t value) {
+void switch_pro_raw_input(uint32_t usage, int32_t value) {
     if (usage >= 0x00200453 && usage <= 0x00200455) {
         imu[usage - 0x00200453] = clamp16(value);
     } else if (usage >= 0x00200457 && usage <= 0x00200459) {
         imu[usage - 0x00200457 + 3] = clamp16(value);
+    } else if (usage >= 0xFFFB0001 && usage <= 0xFFFB0006) {
+        pad_t& pad = usage <= 0xFFFB0003 ? left_pad : right_pad;
+        int32_t* fields[3] = { &pad.x, &pad.y, &pad.pressure };
+        *fields[(usage - 0xFFFB0001) % 3] = value;
+        return;
     } else {
         return;
     }
@@ -446,7 +561,7 @@ void switch_pro_task() {
     full_input(report, elapsed);
     if (!tud_hid_n_report(0, 0x30, report, sizeof(report))) return;
     last_stream_us = now;
-    sent_buttons = buttons_from_horipad();
+    sent_buttons = current_buttons();
     buttons_changed = false;
     stats.reports++;
     if (early && elapsed < STREAM_INTERVAL_US) stats.early_reports++;

@@ -403,6 +403,10 @@ void set_mapping_from_config() {
                 assign_state_slot(usage, 0, true);
             }
         }
+        // Touchpad X, Y and pressure (left, then right) drive the mouse.
+        for (uint32_t usage = 0xFFFB0001; usage <= 0xFFFB0006; usage++) {
+            assign_state_slot(usage, 0, true);
+        }
     }
     register_ptrs.clear();
     memset(input_state, 0, sizeof(input_state));
@@ -1513,7 +1517,7 @@ inline void read_input(const uint8_t* report, int len, uint32_t source_usage, co
     }
 
     if (our_descriptor_number == SWITCH_PRO_DESCRIPTOR_INDEX && !their_usage.should_be_scaled) {
-        switch_pro_imu_input(source_usage, value);
+        switch_pro_raw_input(source_usage, value);
     }
 
     if (their_usage.is_relative) {

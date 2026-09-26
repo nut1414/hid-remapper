@@ -1,5 +1,6 @@
 #include <cassert>
 #include <cstdint>
+#include <cmath>
 #include <cstring>
 
 #include "crc.h"
@@ -81,12 +82,12 @@ int main() {
     uint8_t gamepad[8] = { 0x01, 0, 0x00, 0x80, 0x80, 0x80, 0x80, 0 };
     switch_pro_update_horipad(gamepad, sizeof(gamepad));
     now_us = 1000;
-    switch_pro_imu_input(0x00200453, 1000);
-    switch_pro_imu_input(0x00200454, 2000);
-    switch_pro_imu_input(0x00200455, 16384);
-    switch_pro_imu_input(0x00200457, 100);
-    switch_pro_imu_input(0x00200458, 200);
-    switch_pro_imu_input(0x00200459, 300);
+    switch_pro_raw_input(0x00200453, 1000);
+    switch_pro_raw_input(0x00200454, 2000);
+    switch_pro_raw_input(0x00200455, 16384);
+    switch_pro_raw_input(0x00200457, 100);
+    switch_pro_raw_input(0x00200458, 200);
+    switch_pro_raw_input(0x00200459, 300);
     now_us = 4000;
     switch_pro_task();
     assert(last_id == 0x30 && last_len == 63);
@@ -163,6 +164,72 @@ int main() {
     switch_pro_task();
     switch_pro_task();
     assert(flash_writes == 1);  // Same data, no flash write
+
+    // Touchpads. The IMU sample is stale by now, so gyro carries only pad aim.
+    auto pads = [](int32_t lx, int32_t ly, int32_t lp, int32_t rx, int32_t ry, int32_t rp) {
+        const int32_t values[6] = { lx, ly, lp, rx, ry, rp };
+        for (uint32_t i = 0; i < 6; i++) switch_pro_raw_input(0xFFFB0001 + i, values[i]);
+        switch_pro_input_decoded();
+    };
+    auto stream = [&]() {
+        now_us += 4000;
+        int before = report_count;
+        switch_pro_task();
+        assert(report_count == before + 1 && last_id == 0x30);
+    };
+    const uint8_t neutral[8] = { 0, 0, 0x0F, 0x80, 0x80, 0x80, 0x80, 0 };
+    switch_pro_update_horipad(neutral, sizeof(neutral));
+    now_us = 800000;
+    switch_pro_task();
+    pads(0, 0, 0, 1000, 1000, 500);
+    stream();
+    assert(sample_at(20) == 0 && sample_at(22) == 0);  // First touch does not jump
+    pads(0, 0, 0, 1100, 1050, 500);
+    stream();
+    assert(sample_at(20) == -50 && sample_at(22) == -100);  // Pitch, yaw
+    assert(sample_at(32) == -50 && sample_at(46) == -100);  // All 3 samples
+    // Gravity (stale IMU: 4096 on Z) turns with the added pitch.
+    const float pitch = -50 * 3 * 0.005f * (936.0f / 13371.0f) * (3.14159265f / 180);
+    assert(sample_at(12) == lroundf(-sinf(pitch) * 4096));
+    assert(sample_at(16) == lroundf(cosf(pitch) * 4096));
+    pads(0, 0, 0, 51100, 1050, 500);  // A flick beyond one report's range
+    stream();
+    assert(sample_at(22) == -32768);
+    stream();
+    assert(sample_at(22) == -(50000 - 32768));  // Remainder in the next report
+    stream();
+    assert(sample_at(22) == 0);
+
+    // Right pad press is ZR, sent early; it releases below the lower threshold.
+    pads(0, 0, 0, 11100, 1050, 4000);
+    now_us += 1000;
+    int sent_before = report_count;
+    switch_pro_task();
+    assert(report_count == sent_before + 1 && (last_payload[2] & 0x80));
+    pads(0, 0, 0, 11100, 1050, 3000);
+    stream();
+    assert(last_payload[2] & 0x80);
+    pads(0, 0, 0, 11100, 1050, 2500);
+    now_us += 1000;
+    switch_pro_task();
+    assert(!(last_payload[2] & 0x80));
+
+    // Left pad press at an edge is the d-pad; touch alone or a centre press is not.
+    pads(0, 20000, 500, 0, 0, 0);
+    stream();
+    assert(!(last_payload[4] & 0x0F));
+    pads(0, 20000, 5000, 0, 0, 0);
+    now_us += 1000;
+    switch_pro_task();
+    assert((last_payload[4] & 0x0F) == 0x02);  // Up
+    pads(-20000, -20000, 5000, 0, 0, 0);
+    now_us += 1000;
+    switch_pro_task();
+    assert((last_payload[4] & 0x0F) == 0x09);  // Down + left
+    pads(100, 100, 5000, 0, 0, 0);
+    now_us += 1000;
+    switch_pro_task();
+    assert(!(last_payload[4] & 0x0F));
 
     uint8_t spi_read[15] = {};
     spi_read[9] = 0x10;
