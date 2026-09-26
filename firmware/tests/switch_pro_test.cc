@@ -1,6 +1,5 @@
 #include <cassert>
 #include <cstdint>
-#include <cmath>
 #include <cstring>
 
 #include "crc.h"
@@ -188,10 +187,6 @@ int main() {
     stream();
     assert(sample_at(20) == -50 && sample_at(22) == -100);  // Pitch, yaw
     assert(sample_at(32) == -50 && sample_at(46) == -100);  // All 3 samples
-    // Gravity (stale IMU: 4096 on Z) turns with the added pitch.
-    const float pitch = -50 * 3 * 0.005f * (936.0f / 13371.0f) * (3.14159265f / 180);
-    assert(sample_at(12) == lroundf(-sinf(pitch) * 4096));
-    assert(sample_at(16) == lroundf(cosf(pitch) * 4096));
     pads(0, 0, 0, 51100, 1050, 500);  // A flick beyond one report's range
     stream();
     assert(sample_at(22) == -32768);

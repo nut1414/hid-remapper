@@ -37,6 +37,8 @@ add_executable(remapper
     src/tinyusb_stuff.cc
     src/our_descriptor.cc
     src/switch_pro.cc
+    src/switch2_pro.cc
+    src/aes128.cc
     src/globals.cc
     src/config.cc
     src/quirks.cc
@@ -95,6 +97,8 @@ add_executable(remapper_dual_a
     src/tinyusb_stuff.cc
     src/our_descriptor.cc
     src/switch_pro.cc
+    src/switch2_pro.cc
+    src/aes128.cc
     src/globals.cc
     src/config.cc
     src/quirks.cc
@@ -166,6 +170,8 @@ add_executable(remapper_serial
     src/tinyusb_stuff.cc
     src/our_descriptor.cc
     src/switch_pro.cc
+    src/switch2_pro.cc
+    src/aes128.cc
     src/globals.cc
     src/config.cc
     src/quirks.cc

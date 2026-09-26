@@ -13,8 +13,15 @@
 
 #define MAX_INPUT_REPORT_ID 3
 
-#define NOUR_DESCRIPTORS 7
+#define NOUR_DESCRIPTORS 8
 #define SWITCH_PRO_DESCRIPTOR_INDEX 6
+#define SWITCH2_PRO_DESCRIPTOR_INDEX 7
+
+// Both Switch Pro profiles take Steam Controller motion, touchpads and back
+// buttons straight from the host report.
+inline bool is_switch_pro_descriptor(uint8_t n) {
+    return n == SWITCH_PRO_DESCRIPTOR_INDEX || n == SWITCH2_PRO_DESCRIPTOR_INDEX;
+}
 
 typedef void (*device_connected_t)(uint16_t interface, uint16_t vid, uint16_t pid);
 typedef void (*device_disconnected_t)(uint8_t dev_addr);

@@ -395,7 +395,7 @@ void set_mapping_from_config() {
     reverse_mapping_layers.clear();
     used_state_slots = 0;
     usage_state_ptr.clear();
-    if (our_descriptor_number == SWITCH_PRO_DESCRIPTOR_INDEX) {
+    if (is_switch_pro_descriptor(our_descriptor_number)) {
         // HID inputs are decoded only when a state slot exists. Motion is sent
         // directly in Pro reports, so it needs raw slots even without mappings.
         for (uint32_t usage = 0x00200453; usage <= 0x00200459; usage++) {
@@ -403,8 +403,11 @@ void set_mapping_from_config() {
                 assign_state_slot(usage, 0, true);
             }
         }
-        // Touchpad X, Y and pressure (left, then right) drive the mouse.
+        // Touchpad X, Y and pressure (left, then right) and back buttons.
         for (uint32_t usage = 0xFFFB0001; usage <= 0xFFFB0006; usage++) {
+            assign_state_slot(usage, 0, true);
+        }
+        for (uint32_t usage = SWITCH_PRO_BACK_USAGE_FIRST; usage <= SWITCH_PRO_BACK_USAGE_LAST; usage++) {
             assign_state_slot(usage, 0, true);
         }
     }
@@ -1455,7 +1458,7 @@ bool send_report(send_report_t do_send_report) {
     uint8_t report_id = outgoing_reports[or_head][0];
 
     bool sent = false;
-    if (our_descriptor_number == SWITCH_PRO_DESCRIPTOR_INDEX) {
+    if (is_switch_pro_descriptor(our_descriptor_number)) {
         switch_pro_update_horipad(outgoing_reports[or_head] + 1, report_sizes[report_id]);
         sent = true;
     } else if (our_descriptor == &our_descriptors[our_descriptor_number]) {
@@ -1516,7 +1519,7 @@ inline void read_input(const uint8_t* report, int len, uint32_t source_usage, co
         }
     }
 
-    if (our_descriptor_number == SWITCH_PRO_DESCRIPTOR_INDEX && !their_usage.should_be_scaled) {
+    if (is_switch_pro_descriptor(our_descriptor_number) && !their_usage.should_be_scaled) {
         switch_pro_raw_input(source_usage, value);
     }
 

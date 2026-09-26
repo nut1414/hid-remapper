@@ -647,5 +647,6 @@ Object.assign(usages[4], common_target_usages);
 Object.assign(usages[5], common_target_usages);
 usages[1] = usages[0]; // absolute mouse & keyboard is the same as regular mouse & keyboard
 usages[6] = usages[2]; // Switch Pro uses the same mapping targets as the Switch gamepad
+usages[7] = usages[2]; // So does the Switch 2 Pro controller
 
 export default usages;

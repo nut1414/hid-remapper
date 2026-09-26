@@ -31,6 +31,7 @@
 #include "our_descriptor.h"
 #include "platform.h"
 #include "remapper.h"
+#include "switch2_pro.h"
 #include "switch_pro.h"
 
 // These IDs are bogus. If you want to distribute any hardware using this,
@@ -100,6 +101,18 @@ const uint8_t configuration_descriptor6[] = {
     TUD_HID_DESCRIPTOR(1, 0, HID_ITF_PROTOCOL_NONE, config_report_descriptor_length, 0x83, CFG_TUD_HID_EP_BUFSIZE, 1),
 };
 
+// Switch 2 Pro Controller: HID and vendor (command) functions, each behind an
+// interface association as on the real controller, then our config interface.
+// The real controller's headset audio functions are left out.
+const uint8_t configuration_descriptor7[] = {
+    TUD_CONFIG_DESCRIPTOR(1, 3, 0, TUD_CONFIG_DESC_LEN + 8 + TUD_HID_INOUT_DESC_LEN + 8 + TUD_VENDOR_DESC_LEN + TUD_HID_DESC_LEN, 0xC0, 500),
+    8, TUSB_DESC_INTERFACE_ASSOCIATION, 0, 1, TUSB_CLASS_HID, 0, 0, 0,
+    TUD_HID_INOUT_DESCRIPTOR(0, 0, HID_ITF_PROTOCOL_NONE, switch2_pro_report_descriptor_length, 0x01, 0x81, CFG_TUD_HID_EP_BUFSIZE, 4),
+    8, TUSB_DESC_INTERFACE_ASSOCIATION, 1, 1, TUSB_CLASS_VENDOR_SPECIFIC, 0, 0, 0,
+    TUD_VENDOR_DESCRIPTOR(1, 0, 0x02, 0x82, 64),
+    TUD_HID_DESCRIPTOR(2, 0, HID_ITF_PROTOCOL_NONE, config_report_descriptor_length, 0x83, CFG_TUD_HID_EP_BUFSIZE, 1),
+};
+
 const uint8_t* configuration_descriptors[] = {
     configuration_descriptor0,
     configuration_descriptor1,
@@ -108,6 +121,7 @@ const uint8_t* configuration_descriptors[] = {
     configuration_descriptor4,
     configuration_descriptor5,
     configuration_descriptor6,
+    configuration_descriptor7,
 };
 
 char const* string_desc_arr[] = {
@@ -127,6 +141,13 @@ uint8_t const* tud_descriptor_device_cb() {
     if ((our_descriptor->vid != 0) && (our_descriptor->pid != 0)) {
         desc_device.idVendor = our_descriptor->vid;
         desc_device.idProduct = our_descriptor->pid;
+    }
+    if (our_descriptor_number == SWITCH2_PRO_DESCRIPTOR_INDEX) {
+        // Interface associations, as the real controller declares.
+        desc_device.bDeviceClass = TUSB_CLASS_MISC;
+        desc_device.bDeviceSubClass = MISC_SUBCLASS_COMMON;
+        desc_device.bDeviceProtocol = MISC_PROTOCOL_IAD;
+        desc_device.bcdDevice = 0x0200;
     }
     return (uint8_t const*) &desc_device;
 }
@@ -175,6 +196,10 @@ uint16_t const* tud_descriptor_string_cb(uint8_t index, uint16_t langid) {
             if (index == 1) str = "Nintendo Co., Ltd.";
             if (index == 2) str = "Pro Controller";
         }
+        if (our_descriptor_number == SWITCH2_PRO_DESCRIPTOR_INDEX) {
+            if (index == 1) str = "Nintendo";
+            if (index == 2) str = "Switch 2 Pro Controller";
+        }
 
         // Cap at max char
         chr_count = strlen(str);
@@ -186,7 +211,7 @@ uint16_t const* tud_descriptor_string_cb(uint8_t index, uint16_t langid) {
             _desc_str[1 + i] = str[i];
         }
 
-        if (index == 2 && our_descriptor_number != SWITCH_PRO_DESCRIPTOR_INDEX) {
+        if (index == 2 && !is_switch_pro_descriptor(our_descriptor_number)) {
             uint64_t unique_id = get_unique_id();
             for (uint8_t i = 0; i < 4; i++) {
                 _desc_str[1 + chr_count - 4 + i] = id_chars[(unique_id >> (15 - i * 5)) & 0x1F];
@@ -240,9 +265,35 @@ void tud_hid_report_complete_cb(uint8_t instance, uint8_t const* report, uint16_
     }
 }
 
+// The Switch 2 asks for device info and factory data with vendor requests.
+bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage, tusb_control_request_t const* request) {
+    static uint8_t data[SWITCH2_PRO_FACTORY_DATA_LEN];
+    if (our_descriptor_number != SWITCH2_PRO_DESCRIPTOR_INDEX) {
+        return false;
+    }
+    if (stage != CONTROL_STAGE_SETUP) {
+        return true;
+    }
+    if (request->bmRequestType_bit.direction == TUSB_DIR_IN) {
+        int32_t len = switch2_pro_vendor_request(request->bRequest, data);
+        if (len < 0) {
+            return false;
+        }
+        return tud_control_xfer(rhport, request, data, len < request->wLength ? len : request->wLength);
+    }
+    if (request->wLength > 0) {
+        // Nothing needs the data; take it so the transfer completes.
+        return tud_control_xfer(rhport, request, data, request->wLength < sizeof(data) ? request->wLength : sizeof(data));
+    }
+    return tud_control_status(rhport, request);
+}
+
 void tud_mount_cb() {
-    if (our_descriptor_number == SWITCH_PRO_DESCRIPTOR_INDEX) {
+    if (is_switch_pro_descriptor(our_descriptor_number)) {
         switch_pro_reset();
+    }
+    if (our_descriptor_number == SWITCH2_PRO_DESCRIPTOR_INDEX) {
+        switch2_pro_reset();
     }
     reset_resolution_multiplier();
     if (boot_protocol_keyboard) {

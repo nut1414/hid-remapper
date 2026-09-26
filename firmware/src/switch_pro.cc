@@ -1,4 +1,3 @@
-#include <cmath>
 #include <cstring>
 
 #include <tusb.h>
@@ -60,15 +59,11 @@ constexpr int32_t PAD_RELEASE = 2500;
 // Right pad movement is added to the gyro as rotation: one gyro count per
 // this many pad units.
 constexpr int32_t PAD_AIM_DIVISOR = 1;
-// The console fuses gyro with gravity from the accelerometer, which pulls pad
-// pitch back to the real tilt. So the accelerometer is rotated by the pitch
-// the pad has added. Radians per gyro count in one report, assuming the
-// console integrates 3 samples of 5 ms at the calibrated 936/13371 dps/count.
-constexpr float PAD_AIM_RAD_PER_COUNT = 3 * 0.005f * (936.0f / 13371.0f) * (3.14159265f / 180);
-constexpr float PAD_PITCH_LIMIT = 1.4f;  // About 80 degrees
 // Left pad d-pad: how far from the centre a press must be to count.
 constexpr int32_t PAD_DPAD_THRESHOLD = 12000;
 constexpr uint32_t PRO_ZR = 1u << 7;
+constexpr uint32_t PRO_R3 = 1u << 10;
+constexpr uint32_t PRO_L3 = 1u << 11;
 constexpr uint32_t PRO_DOWN = 1u << 16;
 constexpr uint32_t PRO_UP = 1u << 17;
 constexpr uint32_t PRO_RIGHT = 1u << 18;
@@ -118,9 +113,9 @@ struct pad_t {
 pad_t left_pad;
 pad_t right_pad;
 uint32_t pad_buttons = 0;
+bool back_buttons[4] = {};  // L4, R4, L5, R5
 int32_t aim_x = 0;  // Right pad movement not yet sent as rotation
 int32_t aim_y = 0;
-float pad_pitch = 0;  // Radians of pitch added by the pad so far
 
 uint16_t clamp_us(uint64_t value) {
     return value > 0xFFFF ? 0xFFFF : value;
@@ -186,8 +181,13 @@ uint32_t buttons_from_horipad() {
     return out;
 }
 
+// Back buttons L5 and R5 click the sticks.
+uint32_t back_stick_clicks() {
+    return (back_buttons[2] ? PRO_L3 : 0) | (back_buttons[3] ? PRO_R3 : 0);
+}
+
 uint32_t current_buttons() {
-    return buttons_from_horipad() | pad_buttons;
+    return buttons_from_horipad() | pad_buttons | back_stick_clicks();
 }
 
 void update_pad(pad_t& pad) {
@@ -264,25 +264,8 @@ void full_input(uint8_t* out, uint64_t covered_us) {
         clamp16(ay / 4), clamp16(-ax / 4), clamp16(az / 4),
         clamp16(gy * 4 / 5), 0, 0,
     };
-    int16_t pitch = clamp16(-gx * 9 / 10);
-    sample[4] = add_aim(pitch, aim_y, -1);
+    sample[4] = add_aim(clamp16(-gx * 9 / 10), aim_y, -1);
     sample[5] = add_aim(clamp16(gz * 9 / 10), aim_x, -1);
-    // Pitch beyond the limit is dropped, as if aim had hit the ceiling.
-    float new_pitch = pad_pitch + (sample[4] - pitch) * PAD_AIM_RAD_PER_COUNT;
-    if (fabsf(new_pitch) > PAD_PITCH_LIMIT) {
-        new_pitch = copysignf(PAD_PITCH_LIMIT, new_pitch);
-        sample[4] = pitch + int32_t((new_pitch - pad_pitch) / PAD_AIM_RAD_PER_COUNT);
-    }
-    pad_pitch = new_pitch;
-    if (pad_pitch != 0) {
-        // Gravity seen from a controller pitched by pad_pitch about Y.
-        float c = cosf(pad_pitch);
-        float s = sinf(pad_pitch);
-        int32_t x = sample[0];
-        int32_t z = sample[2];
-        sample[0] = clamp16(lroundf(c * x - s * z));
-        sample[2] = clamp16(lroundf(s * x + c * z));
-    }
     for (uint8_t n = 0; n < 3; n++) {
         for (uint8_t axis = 0; axis < 6; axis++) {
             put16(out + 12 + n * 12 + axis * 2, sample[axis]);
@@ -439,8 +422,8 @@ void switch_pro_reset() {
     in_flight_input_us = in_flight_button_us = 0;
     left_pad = right_pad = {};
     pad_buttons = 0;
+    memset(back_buttons, 0, sizeof(back_buttons));
     aim_x = aim_y = 0;
-    pad_pitch = 0;
     if (!user_cal_initialized) {
         memset(user_cal, 0xFF, sizeof(user_cal));
         load_user_cal();
@@ -488,6 +471,16 @@ void switch_pro_input_decoded() {
     }
 }
 
+void switch_pro_get_input(switch_pro_input_t* out) {
+    out->buttons = current_buttons();
+    out->back_left = back_buttons[0];
+    out->back_right = back_buttons[1];
+    out->sticks[0] = stick_axis(horipad[3], false);
+    out->sticks[1] = stick_axis(horipad[4], true);
+    out->sticks[2] = stick_axis(horipad[5], false);
+    out->sticks[3] = stick_axis(horipad[6], true);
+}
+
 void switch_pro_report_complete(uint8_t report_id) {
     if (report_id != 0x30) return;
     uint64_t now = get_time();
@@ -506,6 +499,9 @@ void switch_pro_raw_input(uint32_t usage, int32_t value) {
         imu[usage - 0x00200453] = clamp16(value);
     } else if (usage >= 0x00200457 && usage <= 0x00200459) {
         imu[usage - 0x00200457 + 3] = clamp16(value);
+    } else if (usage >= SWITCH_PRO_BACK_USAGE_FIRST && usage <= SWITCH_PRO_BACK_USAGE_LAST) {
+        back_buttons[usage - SWITCH_PRO_BACK_USAGE_FIRST] = value;
+        return;
     } else if (usage >= 0xFFFB0001 && usage <= 0xFFFB0006) {
         pad_t& pad = usage <= 0xFFFB0003 ? left_pad : right_pad;
         int32_t* fields[3] = { &pad.x, &pad.y, &pad.pressure };

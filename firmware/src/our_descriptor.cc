@@ -4,6 +4,7 @@
 #include "our_descriptor.h"
 #include "ps_auth.h"
 #include "remapper.h"
+#include "switch2_pro.h"
 #include "switch_pro.h"
 
 const uint8_t REPORT_ID_MOUSE = 1;
@@ -715,6 +716,21 @@ const our_descriptor_def_t our_descriptors[] = {
         .main_loop_task = switch_pro_task,
         .handle_received_report = switch_pro_handle_received_report,
         .handle_set_report = switch_pro_handle_set_report,
+        .clear_report = horipad_clear_report,
+        .default_value = horipad_default_value,
+    },
+    {
+        .idx = SWITCH2_PRO_DESCRIPTOR_INDEX,
+        // Same HORI mappings and Steam Controller extras as the Pro profile.
+        .descriptor = our_report_descriptor_horipad,
+        .descriptor_length = sizeof(our_report_descriptor_horipad),
+        .usb_descriptor = switch2_pro_report_descriptor,
+        .usb_descriptor_length = switch2_pro_report_descriptor_length,
+        .vid = 0x057E,
+        .pid = 0x2069,
+        .main_loop_task = switch2_pro_task,
+        .handle_received_report = switch_pro_handle_received_report,
+        .handle_set_report = switch2_pro_handle_set_report,
         .clear_report = horipad_clear_report,
         .default_value = horipad_default_value,
     },
