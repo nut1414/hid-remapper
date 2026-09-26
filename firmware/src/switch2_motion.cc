@@ -12,17 +12,47 @@ constexpr float ACCEL_UNITS_PER_G = 16384;
 // controller is being shaken.
 constexpr float GRAVITY_GAIN = 1.0f;
 constexpr float GRAVITY_TOLERANCE = 0.2f;
-// Touchpad: about 70 degrees for a full swipe across the pad.
-constexpr float PAD_RAD_PER_UNIT = 1.8e-5f;
+// Touchpad: about 63 degrees for a full swipe across the pad.
+constexpr float PAD_RAD_PER_UNIT = 1.62e-5f;
 constexpr float PAD_PITCH_LIMIT = 1.4f;  // About 80 degrees
+// Pad aim follows its target through a One Euro filter: slow movement is
+// smoothed at MIN_CUTOFF (Hz), faster movement raises the cutoff by BETA
+// per rad/s. BETA is kept low so flicks are smoothed too (a sudden flick
+// lands over about 3 reports). DERIVATIVE_CUTOFF smooths the speed estimate.
+constexpr float PAD_MIN_CUTOFF = 15;
+constexpr float PAD_BETA = 2;
+constexpr float PAD_DERIVATIVE_CUTOFF = 10;
 
 // Resting flat: body Z up is world Y up, body Y forward is world -Z.
 const float rest[4] = { 0.70710678f, -0.70710678f, 0, 0 };
 
 float real[4];      // Real controller orientation
-float pad_yaw;      // Radians, about world up; positive turns left
-float pad_pitch;    // Radians, about body right; positive looks up
-float rate_dps[3];  // Last body rates, pad included
+float real_rate[3];  // Last real gyro rates (rad/s)
+
+// Pad aim in radians: yaw about world up (positive turns left), pitch about
+// body right (positive looks up).
+struct pad_axis_t {
+    float target;  // Where the pad has put it
+    float value;   // Smoothed, as sent
+    float speed;   // Smoothed speed estimate (rad/s)
+    float rate;    // Change over the last advance (rad/s)
+};
+pad_axis_t pad_yaw;
+pad_axis_t pad_pitch;
+
+float smoothing(float cutoff, float dt) {
+    float tau = 1 / (2 * PI * cutoff);
+    return 1 / (1 + tau / dt);
+}
+
+void follow(pad_axis_t& axis, float dt) {
+    float speed = (axis.target - axis.value) / dt;
+    axis.speed += smoothing(PAD_DERIVATIVE_CUTOFF, dt) * (speed - axis.speed);
+    float cutoff = PAD_MIN_CUTOFF + PAD_BETA * fabsf(axis.speed);
+    float step = smoothing(cutoff, dt) * (axis.target - axis.value);
+    axis.value += step;
+    axis.rate = step / dt;
+}
 
 void multiply(const float* a, const float* b, float* out) {
     float r[4] = {
@@ -47,8 +77,8 @@ void body_up(const float* q, float* up) {
 }
 
 void output(float* q) {
-    const float yaw[4] = { cosf(pad_yaw / 2), 0, sinf(pad_yaw / 2), 0 };
-    const float pitch[4] = { cosf(pad_pitch / 2), sinf(pad_pitch / 2), 0, 0 };
+    const float yaw[4] = { cosf(pad_yaw.value / 2), 0, sinf(pad_yaw.value / 2), 0 };
+    const float pitch[4] = { cosf(pad_pitch.value / 2), sinf(pad_pitch.value / 2), 0, 0 };
     multiply(yaw, real, q);
     multiply(q, pitch, q);
     normalize(q);
@@ -64,8 +94,8 @@ void put_bits(uint8_t* buf, uint16_t bitpos, uint32_t value, uint8_t bits) {
 
 void switch2_motion_reset() {
     memcpy(real, rest, sizeof(real));
-    pad_yaw = pad_pitch = 0;
-    memset(rate_dps, 0, sizeof(rate_dps));
+    pad_yaw = pad_pitch = {};
+    memset(real_rate, 0, sizeof(real_rate));
 }
 
 void switch2_motion_update(const int16_t accel[3], const int16_t gyro[3], bool motion,
@@ -96,31 +126,36 @@ void switch2_motion_update(const int16_t accel[3], const int16_t gyro[3], bool m
         normalize(real);
     }
 
-    // Right on the pad turns right, up looks up.
-    float yaw_step = -pad_x * PAD_RAD_PER_UNIT;
-    float old_pitch = pad_pitch;
-    pad_yaw = remainderf(pad_yaw + yaw_step, 2 * PI);
-    pad_pitch += pad_y * PAD_RAD_PER_UNIT;
-    if (pad_pitch > PAD_PITCH_LIMIT) pad_pitch = PAD_PITCH_LIMIT;
-    if (pad_pitch < -PAD_PITCH_LIMIT) pad_pitch = -PAD_PITCH_LIMIT;
+    memcpy(real_rate, w, sizeof(real_rate));
 
-    // Body rates: the real gyro, plus pad yaw about the up axis and pad
-    // pitch about the right axis.
-    float q[4];
-    output(q);
-    float up[3];
-    body_up(q, up);
-    for (uint8_t i = 0; i < 3; i++) {
-        float rate = w[i];
-        if (dt > 0) rate += up[i] * yaw_step / dt + (i == 0 ? (pad_pitch - old_pitch) / dt : 0);
-        rate_dps[i] = rate * 180 / PI;
+    // Right on the pad turns right, up looks up.
+    pad_yaw.target -= pad_x * PAD_RAD_PER_UNIT;
+    pad_pitch.target += pad_y * PAD_RAD_PER_UNIT;
+    if (pad_pitch.target > PAD_PITCH_LIMIT) pad_pitch.target = PAD_PITCH_LIMIT;
+    if (pad_pitch.target < -PAD_PITCH_LIMIT) pad_pitch.target = -PAD_PITCH_LIMIT;
+    // Keep yaw small so float precision holds up; both move together.
+    if (fabsf(pad_yaw.value) > 2 * PI) {
+        float turns = 2 * PI * roundf(pad_yaw.value / (2 * PI));
+        pad_yaw.value -= turns;
+        pad_yaw.target -= turns;
     }
+}
+
+void switch2_motion_advance(float dt) {
+    if (dt <= 0) return;
+    follow(pad_yaw, dt);
+    follow(pad_pitch, dt);
 }
 
 void switch2_motion_get(switch2_motion_t* out) {
     output(out->q);
     body_up(out->q, out->accel);
-    memcpy(out->gyro_dps, rate_dps, sizeof(rate_dps));
+    // Body rates: the real gyro, plus pad yaw about the up axis and pad
+    // pitch about the right axis.
+    for (uint8_t i = 0; i < 3; i++) {
+        float rate = real_rate[i] + out->accel[i] * pad_yaw.rate + (i == 0 ? pad_pitch.rate : 0);
+        out->gyro_dps[i] = rate * 180 / PI;
+    }
 }
 
 void switch2_motion_pack_mode12(const switch2_motion_t& motion, uint8_t* out) {

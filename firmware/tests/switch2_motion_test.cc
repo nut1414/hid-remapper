@@ -9,6 +9,12 @@
 static const int16_t flat_accel[3] = { 0, 0, 16384 };
 static const int16_t no_gyro[3] = { 0, 0, 0 };
 
+static const float PAD_RAD = 1.62e-5f;  // Must match switch2_motion.cc
+
+static void settle() {
+    for (int i = 0; i < 100; i++) switch2_motion_advance(0.004f);
+}
+
 static bool near(float a, float b, float tolerance) {
     return fabsf(a - b) < tolerance;
 }
@@ -75,29 +81,76 @@ int main() {
 
     // Pad right turns right (towards world +X) and leaves gravity alone.
     switch2_motion_update(flat_accel, no_gyro, true, 20000, 0, 0.004f);
+    switch2_motion_advance(0.004f);
+    switch2_motion_get(&m);
+    assert(m.gyro_dps[2] < 0);  // Turning right about the up axis
+    settle();
     switch2_motion_get(&m);
     forward(m.q, f);
-    assert(f[0] > 0.3f && near(f[1], 0, 1e-4f));
+    assert(near(asinf(f[0]), 20000 * PAD_RAD, 1e-3f) && near(f[1], 0, 1e-4f));
     assert(near(m.accel[2], 1, 1e-4f));
-    assert(m.gyro_dps[2] < 0);  // Turning right about the up axis
     check_roundtrip(m);
 
     // Pad up looks up, and stays up against gravity correction.
     switch2_motion_reset();
     switch2_motion_update(flat_accel, no_gyro, true, 0, 20000, 0.004f);
-    for (int i = 0; i < 2000; i++) switch2_motion_update(flat_accel, no_gyro, true, 0, 0, 0.004f);
+    for (int i = 0; i < 2000; i++) {
+        switch2_motion_update(flat_accel, no_gyro, true, 0, 0, 0.004f);
+        switch2_motion_advance(0.004f);
+    }
     switch2_motion_get(&m);
     forward(m.q, f);
     float pitch = asinf(f[1]);
-    assert(near(pitch, 20000 * 1.8e-5f, 1e-3f));
+    assert(near(pitch, 20000 * PAD_RAD, 1e-3f));
     assert(near(m.accel[1], sinf(pitch), 1e-3f));  // Gravity agrees with the aim
     check_roundtrip(m);
 
     // Pad pitch stops at about 80 degrees.
     switch2_motion_update(flat_accel, no_gyro, true, 0, 200000, 0.004f);
+    settle();
     switch2_motion_get(&m);
     forward(m.q, f);
     assert(near(asinf(f[1]), 1.4f, 1e-3f));
+
+    // Smoothing: a small, slow pad move is eased in over a few reports...
+    switch2_motion_reset();
+    switch2_motion_update(flat_accel, no_gyro, true, -100, 0, 0.004f);
+    switch2_motion_advance(0.004f);
+    switch2_motion_get(&m);
+    forward(m.q, f);
+    float slow_target = 100 * PAD_RAD;
+    assert(f[0] < -0.15f * slow_target && f[0] > -0.6f * slow_target);
+    for (int i = 0; i < 12; i++) switch2_motion_advance(0.004f);
+    switch2_motion_get(&m);
+    forward(m.q, f);
+    assert(f[0] < -0.95f * slow_target);
+
+    // ...and a sudden flick is smoothed too, landing within a few reports.
+    switch2_motion_reset();
+    float flick = 40000 * PAD_RAD;
+    switch2_motion_update(flat_accel, no_gyro, true, -40000, 0, 0.004f);
+    switch2_motion_advance(0.004f);
+    switch2_motion_get(&m);
+    forward(m.q, f);
+    assert(asinf(-f[0]) > 0.3f * flick && asinf(-f[0]) < 0.9f * flick);
+    for (int i = 0; i < 3; i++) switch2_motion_advance(0.004f);
+    switch2_motion_get(&m);
+    forward(m.q, f);
+    assert(asinf(-f[0]) > 0.9f * flick);
+
+    // Uneven arrival (two pad samples, then none) comes out as even steps.
+    switch2_motion_reset();
+    float last = 0;
+    float steps[40];
+    for (int i = 0; i < 40; i++) {
+        switch2_motion_update(flat_accel, no_gyro, true, i % 2 ? 0 : -200, 0, 0.004f);
+        switch2_motion_advance(0.004f);
+        switch2_motion_get(&m);
+        forward(m.q, f);
+        steps[i] = asinf(-f[0]) - last;
+        last = asinf(-f[0]);
+    }
+    for (int i = 20; i < 40; i++) assert(near(steps[i], 100 * PAD_RAD, 0.5f * 100 * PAD_RAD));
 
     // Real gyro: 90 deg/s about the up axis for 1 s turns left by 90 degrees.
     switch2_motion_reset();
@@ -121,6 +174,7 @@ int main() {
     for (int k = 0; k < 200; k++) {
         const int16_t spin[3] = { int16_t(k * 37 - 3000), int16_t(4000 - k * 29), int16_t(k * 11) };
         switch2_motion_update(flat_accel, spin, true, k * 13, -k * 7, 0.004f);
+        switch2_motion_advance(0.004f);
         switch2_motion_get(&m);
         check_roundtrip(m);
     }

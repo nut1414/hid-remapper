@@ -23,6 +23,8 @@ void switch2_motion_reset();
 // dt in seconds since the previous update.
 void switch2_motion_update(const int16_t accel[3], const int16_t gyro[3], bool motion,
                            int32_t pad_x, int32_t pad_y, float dt);
+// Moves the smoothed pad aim towards its target; call once per report.
+void switch2_motion_advance(float dt);
 void switch2_motion_get(switch2_motion_t* out);
 
 // Packs an orientation as report 0x09 motion mode 12 (26 bytes): the

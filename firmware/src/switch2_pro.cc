@@ -146,6 +146,7 @@ uint64_t last_report_us = 0;
 uint64_t last_motion_us = 0;
 uint64_t motion_start_us = 0;
 uint16_t last_sample = 0;
+uint64_t last_advance_us = 0;
 uint8_t host_key[16];
 uint8_t rx[256];
 uint16_t rx_len = 0;
@@ -420,6 +421,7 @@ void switch2_pro_reset() {
     last_motion_us = 0;
     motion_start_us = get_time();
     last_sample = 0;
+    last_advance_us = 0;
     switch2_motion_reset();
 }
 
@@ -491,6 +493,12 @@ int32_t switch2_pro_vendor_request(uint8_t request, uint8_t* data) {
 }
 
 uint8_t switch2_pro_build_report(uint8_t* out) {
+    uint64_t now = get_time();
+    if (last_advance_us) {
+        float dt = (now - last_advance_us) * 1e-6f;
+        switch2_motion_advance(dt < 0.05f ? dt : 0.05f);
+    }
+    last_advance_us = now;
     switch_pro_input_t input;
     switch_pro_get_input(&input);
     memset(out, 0, SWITCH2_PRO_REPORT_LEN);
